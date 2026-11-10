@@ -1,6 +1,14 @@
-# Realmm 2.1.1
+# Realmm 2.2.0
 
 Realm TCP/UDP 转发配置管理脚本，配置文件统一使用 `/etc/realm/config.toml`。支持 systemd 和 OpenRC。
+
+## 2.2.0 更新内容
+
+- 新增菜单 `22) 更新 realmm 脚本`：从 GitHub 检查并更新脚本本身，也可在命令行执行 `realmm --update`。
+- 更新前会校验下载内容（脚本头、版本号、`bash -n` 语法检查），失败或内容异常时不会覆盖当前脚本。
+- 更新前自动备份旧脚本到 `/etc/realm/backups/realmm-script-时间戳`，出问题可直接复制回 `/usr/local/bin/realmm`。
+- 更新脚本不会改动 Realm 服务和 `config.toml`，转发不会中断。
+- 修复在旧 glibc 系统上安装 Realm 失败（`新二进制无法运行`）：glibc 系统先尝试 gnu 版，无法运行时自动改用静态 musl 版重试。
 
 ## 2.1.1 更新内容
 
@@ -53,6 +61,14 @@ realmm
 ```
 
 > 以上 Raw 链接在把本版本的 `realmm.sh` 上传到 GitHub 仓库 `Withxxy/Realmm` 的 `main` 分支后生效。仅下载本压缩包不会自动修改 GitHub 仓库。
+
+## 更新脚本
+
+```bash
+realmm --update
+```
+
+或在菜单中选择 `22) 更新 realmm 脚本`。脚本会显示当前版本和 GitHub 上的最新版本，确认后替换 `/usr/local/bin/realmm` 并可选择立即重新启动。更新源可通过环境变量 `REALMM_SCRIPT_URL` 覆盖。
 
 ## 连通性测试说明
 

@@ -3,7 +3,7 @@
 # 配置唯一数据源：/etc/realm/config.toml
 # 不再通过 rules.list 重建配置，避免覆盖 AI 写入的自定义 TOML 参数。
 
-VERSION="2.1.1"
+VERSION="2.2.0"
 umask 077
 
 RULE_DIR="/etc/realm"
@@ -93,6 +93,53 @@ install_manager() {
     warn "无法从 GitHub 同步快捷命令；不影响本次运行"
   fi
   rm -f "$tmp"
+}
+
+# ---------- Script self-update ----------
+update_script() {
+  local tmp remote_ver stamp backup="" ans
+  echo "当前脚本版本：$VERSION"
+  echo "更新源：$SCRIPT_URL"
+  tmp="$(mktemp /tmp/realmm-update.XXXXXX)" || { err "无法创建临时文件"; return 1; }
+  echo "正在检查更新..."
+  if ! download_file "$SCRIPT_URL" "$tmp"; then
+    err "下载失败：请检查网络能否访问 GitHub；当前脚本未修改"
+    rm -f "$tmp"; return 1
+  fi
+  if ! head -n 1 "$tmp" | grep -q '^#!.*bash' || ! grep -q '^VERSION="' "$tmp"; then
+    err "下载内容不像 realmm 脚本（可能是错误页面或链接失效）；当前脚本未修改"
+    rm -f "$tmp"; return 1
+  fi
+  if ! bash -n "$tmp" >/dev/null 2>&1; then
+    err "新脚本语法检查未通过，已放弃更新；当前脚本未修改"
+    rm -f "$tmp"; return 1
+  fi
+  remote_ver="$(sed -n 's/^VERSION="\([^"]*\)".*/\1/p' "$tmp" | head -n 1)"
+  echo "最新版本：${remote_ver:-未知}"
+  if [[ -f "$MANAGER" ]] && cmp -s "$tmp" "$MANAGER"; then
+    ok "已是最新版本，无需更新"
+    rm -f "$tmp"; return 0
+  fi
+  [[ "$remote_ver" == "$VERSION" ]] && warn "版本号相同，但文件内容有差异（可能是小修订）"
+  read -r -p "更新到 ${remote_ver:-最新版}？[Y/n] " ans
+  case "$ans" in n|N) echo "已取消"; rm -f "$tmp"; return 0 ;; esac
+
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  if [[ -f "$MANAGER" ]]; then
+    backup="$BACKUP_DIR/realmm-script-$stamp"
+    cp -p "$MANAGER" "$backup" || { err "备份当前脚本失败，已放弃更新"; rm -f "$tmp"; return 1; }
+  fi
+  if ! install -m 755 "$tmp" "$MANAGER.new" || ! mv -f "$MANAGER.new" "$MANAGER"; then
+    err "写入 $MANAGER 失败；当前脚本未修改"
+    rm -f "$tmp" "$MANAGER.new"; return 1
+  fi
+  rm -f "$tmp"
+  ok "脚本已更新为 ${remote_ver:-最新版}"
+  [[ -n "$backup" ]] && echo "旧版本备份：$backup（如有问题：cp -p $backup $MANAGER）"
+  echo "提示：Realm 服务与转发配置不受影响。"
+  read -r -p "立即用新版重新启动？[Y/n] " ans
+  case "$ans" in n|N) echo "下次输入 realmm 即为新版"; return 0 ;; esac
+  exec "$MANAGER"
 }
 
 # ---------- Dependencies / TOML parser ----------
@@ -1245,7 +1292,7 @@ install_realm() {
 
   read -r -p 'Realm 版本（回车=latest，例如 v2.9.6）：' version
   version="${version:-latest}"
-  local libc asset
+  local libc variants variant asset candidate_ok=0
   case "$(uname -m)" in
     x86_64|amd64) arch=x86_64 ;;
     aarch64|arm64) arch=aarch64 ;;
@@ -1253,31 +1300,50 @@ install_realm() {
     *) err "暂不支持架构 $(uname -m)，当前支持 x86_64/aarch64/armv7"; return ;;
   esac
   if ldd --version 2>&1 | grep -qi musl; then libc=musl; else libc=gnu; fi
-  case "$arch:$libc" in
-    x86_64:*) asset="realm-x86_64-unknown-linux-${libc}.tar.gz" ;;
-    aarch64:*) asset="realm-aarch64-unknown-linux-${libc}.tar.gz" ;;
-    armv7:musl) asset="realm-armv7-unknown-linux-musleabihf.tar.gz" ;;
-    armv7:gnu) asset="realm-armv7-unknown-linux-gnueabihf.tar.gz" ;;
-  esac
-  if [[ "$version" == latest ]]; then
-    url="https://github.com/zhboner/realm/releases/latest/download/${asset}"
-  else
+  # glibc 系统先试 gnu 版；若系统 glibc 过旧导致无法运行，自动改用静态 musl 版
+  if [[ "$libc" == gnu ]]; then variants="gnu musl"; else variants="musl"; fi
+  if [[ "$version" != latest ]]; then
     [[ "$version" =~ ^v?[0-9A-Za-z._-]+$ ]] || { err "版本号格式不正确"; return; }
-    url="https://github.com/zhboner/realm/releases/download/${version}/${asset}"
   fi
 
   work="$(mktemp -d /tmp/realmm-install.XXXXXX)" || return
-  echo "下载：$url"
-  if ! download_file "$url" "$work/realm.tar.gz" || ! tar -tzf "$work/realm.tar.gz" >/dev/null 2>&1; then
-    err "下载失败或压缩包损坏；现有 Realm 未修改"
+  candidate=""
+  for variant in $variants; do
+    case "$arch:$variant" in
+      x86_64:*) asset="realm-x86_64-unknown-linux-${variant}.tar.gz" ;;
+      aarch64:*) asset="realm-aarch64-unknown-linux-${variant}.tar.gz" ;;
+      armv7:musl) asset="realm-armv7-unknown-linux-musleabihf.tar.gz" ;;
+      armv7:gnu) asset="realm-armv7-unknown-linux-gnueabihf.tar.gz" ;;
+    esac
+    if [[ "$version" == latest ]]; then
+      url="https://github.com/zhboner/realm/releases/latest/download/${asset}"
+    else
+      url="https://github.com/zhboner/realm/releases/download/${version}/${asset}"
+    fi
+    rm -rf "$work/pkg" "$work/realm.tar.gz"; mkdir -p "$work/pkg"
+    echo "下载：$url"
+    if ! download_file "$url" "$work/realm.tar.gz" || ! tar -tzf "$work/realm.tar.gz" >/dev/null 2>&1; then
+      warn "$variant 版下载失败或压缩包损坏"
+      continue
+    fi
+    tar -xzf "$work/realm.tar.gz" -C "$work/pkg" || { warn "$variant 版解压失败"; continue; }
+    candidate="$(find "$work/pkg" -type f -name realm -print -quit 2>/dev/null)"
+    [[ -n "$candidate" ]] || { warn "压缩包中没有 realm 二进制"; continue; }
+    chmod 755 "$candidate"
+    if "$candidate" --version >/dev/null 2>&1; then candidate_ok=1; break; fi
+    if [[ "$variant" == gnu ]]; then
+      warn "gnu 版二进制无法在本机运行（常见原因：系统 glibc 过旧）"
+      echo "改用静态 musl 版重试..."
+    else
+      warn "$variant 版二进制无法在本机运行"
+    fi
+  done
+  if (( ! candidate_ok )); then
+    err "所有版本均无法使用；现有 Realm 未修改"
     rm -rf "$work"
     return
   fi
-  tar -xzf "$work/realm.tar.gz" -C "$work" || { err "解压失败"; rm -rf "$work"; return; }
-  candidate="$(find "$work" -type f -name realm -print -quit 2>/dev/null)"
-  [[ -n "$candidate" ]] || { err "压缩包中没有 realm 二进制"; rm -rf "$work"; return; }
-  chmod 755 "$candidate"
-  "$candidate" --version >/dev/null 2>&1 || { err "新二进制无法运行，未替换旧版本"; rm -rf "$work"; return; }
+  ok "已选用 ${variant} 版：$("$candidate" --version 2>&1 | head -n 1)"
 
   stamp="$(date +%Y%m%d-%H%M%S)"
   old_backup=""
@@ -1814,6 +1880,11 @@ if [[ "${1:-}" == "--self-test" ]]; then
   exit "$rc"
 fi
 
+if [[ "${1:-}" == "--update" ]]; then
+  update_script
+  exit $?
+fi
+
 install_manager
 ensure_tools || warn "TOML 解析依赖未就绪；请先安装 Python 3.11+ 或 tomli。"
 
@@ -1840,9 +1911,10 @@ while true; do
   echo " 19) 重启 Realm"
   echo " 20) 卸载新版 Realm"
   echo " 21) 暂停 / 恢复单条规则"
+  echo " 22) 更新 realmm 脚本"
   echo "  0) 退出"
   echo "${B}------------------------------------------------${N}"
-  if ! read -r -p '请选择 [0-21]：' choice; then echo; exit 0; fi
+  if ! read -r -p '请选择 [0-22]：' choice; then echo; exit 0; fi
   echo
   case "$choice" in
     1) install_realm ;;
@@ -1866,6 +1938,7 @@ while true; do
     19) restart_realm ;;
     20) uninstall_realm ;;
     21) manage_rule_state ;;
+    22) update_script ;;
     0) echo '再见'; exit 0 ;;
     *) warn '无效选项' ;;
   esac
