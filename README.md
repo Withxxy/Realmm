@@ -1,119 +1,79 @@
-# Realmm — Realm 转发管理面板
+# Realmm 2.1.1
 
-Realmm 是一个面向 Linux VPS 的 Realm 配置与服务管理脚本。它既支持菜单式管理转发规则，也支持直接编辑或导入 AI 生成的完整 `config.toml`。
+Realm TCP/UDP 转发配置管理脚本，配置文件统一使用 `/etc/realm/config.toml`。支持 systemd 和 OpenRC。
+
+## 2.1.1 更新内容
+
+- 修复菜单 13 的功能回退：恢复 ICMP Ping 检测。
+- 菜单 13 更名为“综合连通性测试（TCP / Ping）”。
+- 每条启用规则依次检查本机 TCP 监听、目标 TCP 连接和目标主机 ICMP Ping。
+- 从 `host:port` 或 `[IPv6]:port` 中正确提取 Ping 主机，不会把目标端口当成 Ping 地址。
+- 输出 Ping 的发送/接收、丢包率和 RTT 摘要；目标禁 Ping 时明确提示，不把 ICMP 失败误判为 TCP 转发失败。
+- 保留 UDP 状态提示。UDP 业务是否可用仍需使用实际 UDP 客户端验证。
+- 增加自检：覆盖 IPv4、域名和 IPv6 目标主机解析。
 
 ## 主要功能
 
-- Realm 安装、更新与卸载
-- IPv4 / IPv6 监听地址和目标地址
-- 转发规则添加、修改、改名、删除
-- 单条规则暂停与恢复
-- 完整 `config.toml` 查看、编辑、导入、导出
-- TOML 语法检查；应用失败时尝试恢复修改前配置
-- 每次修改前自动备份配置，并支持从备份恢复
-- systemd / OpenRC 服务管理
-- 服务状态、日志和 TCP 目标连通性检查
-- 识别旧版 `/opt/realm` 安装，并提供备份后迁移
-- `realmm` 快捷命令
+- 安装 / 更新 Realm。
+- 添加、查看、修改、改名、删除转发规则。
+- 查看、编辑、导入、导出完整 `config.toml`，便于与 AI 协作生成配置。
+- 配置校验、应用前备份和应用失败回滚。
+- 服务状态、日志、TCP 连通性及 ICMP Ping 检测。
+- UDP 开关、单条规则暂停 / 恢复。
+- 识别并迁移旧版 `/opt/realm` 安装；迁移前备份旧文件。
 
-## 系统要求
+## 安装 / 更新
 
-- Linux，root 权限
-- Bash
-- Python 3.11+（内置 `tomllib`），或 Python 3 + `tomli`
-- 支持 systemd 或 OpenRC
-- 支持 x86_64、aarch64；安装包提供对应架构时支持 armv7
-
-## 一键运行
-
-### Debian / Ubuntu 等常见 Linux
+在 Linux VPS 上以 root 执行：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/Withxxy/Realmm/main/realmm.sh)
+curl -fL --retry 3 \
+  -o /usr/local/bin/realmm \
+  https://raw.githubusercontent.com/Withxxy/Realmm/main/realmm.sh \
+  && chmod 755 /usr/local/bin/realmm \
+  && realmm
 ```
 
-如果系统没有 curl，但有 wget：
+如果服务器没有 curl，可使用 wget：
 
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/Withxxy/Realmm/main/realmm.sh)
+wget -qO /usr/local/bin/realmm \
+  https://raw.githubusercontent.com/Withxxy/Realmm/main/realmm.sh \
+  && chmod 755 /usr/local/bin/realmm \
+  && realmm
 ```
 
-### Alpine Linux
-
-Alpine 默认 shell 通常是 ash，不支持 Bash 的进程替换语法。先安装 Bash 和下载工具：
+也可以先下载后检查语法：
 
 ```bash
-apk add --no-cache bash curl
-curl -fsSL https://raw.githubusercontent.com/Withxxy/Realmm/main/realmm.sh -o /tmp/realmm.sh
-bash /tmp/realmm.sh
-```
-
-首次通过 GitHub 运行时，脚本会尝试安装 `/usr/local/bin/realmm`。之后可以直接执行：
-
-```bash
+curl -fL --retry 3 -o /tmp/realmm.sh \
+  https://raw.githubusercontent.com/Withxxy/Realmm/main/realmm.sh
+bash -n /tmp/realmm.sh && install -m 755 /tmp/realmm.sh /usr/local/bin/realmm
 realmm
 ```
 
-## AI 生成配置的使用方式
+> 以上 Raw 链接在把本版本的 `realmm.sh` 上传到 GitHub 仓库 `Withxxy/Realmm` 的 `main` 分支后生效。仅下载本压缩包不会自动修改 GitHub 仓库。
 
-1. 让 AI 按 Realm 当前版本的配置格式生成完整 TOML。
-2. 将配置保存到 VPS 文件，例如 `/root/realm-new.toml`。
-3. 在 Realmm 菜单中选择“导入 AI 生成的 TOML 文件”。
-4. 导入前会先校验 TOML 语法，并备份当前配置。
-5. 应用后如果服务启动失败，管理器会尝试恢复修改前的配置。
+## 连通性测试说明
 
-也可以选择“编辑完整 config.toml”，直接使用 nano 或 vi 编辑。
+菜单选择 `13) 综合连通性测试（TCP / Ping）`：
 
-**注意：TOML 语法检查不等同于 Realm 配置 schema 检查。** Realm 本身不接受的字段仍可能导致服务启动失败；管理器会检查服务启动结果并尝试回滚，但建议先备份并在测试环境验证 AI 生成的配置。
+1. 检查本机 TCP 监听端口。
+2. 检查 VPS 到目标 `IP:端口` 的 TCP 连接。
+3. 对目标主机执行 4 次 ICMP Ping，显示丢包和 RTT 摘要。
+4. 显示 UDP 开关状态。
 
-## 旧版迁移
-
-如果原来使用 `/opt/realm/realm` 和 `/opt/realm/config.toml`，在新版菜单选择“识别并迁移旧版 /opt/realm”。
-
-迁移前会：
-
-- 备份 `/opt/realm`、`/etc/realm` 和当前 systemd 服务文件
-- 检查旧配置 TOML 语法
-- 读取旧版 `endpoints.dat`（仅当配置中没有 endpoint 时作为补充）
-- 让用户选择迁移使用哪份配置
-- 要求输入 `yes` 才开始切换服务
-
-迁移会短暂停止并重新启动 Realm，可能造成数秒连接中断。旧版 `/opt/realm` 目录不会自动删除。若新版服务启动失败，脚本会尝试恢复原 systemd 服务、配置和运行状态。
-
-## 配置与备份位置
-
-| 路径 | 用途 |
-|---|---|
-| `/etc/realm/config.toml` | 当前唯一生效配置源 |
-| `/etc/realm/backups/` | 每次修改前的配置备份 |
-| `/usr/local/bin/realm` | Realm 主程序 |
-| `/usr/local/bin/realmm` | 管理器快捷命令 |
-| `/opt/realm/` | 旧版目录；迁移后保留作回退备份 |
+Ping 只测试目标主机的 ICMP 可达性，不会测试 Realm 转发链路本身。部分服务器会过滤 ICMP，因此 Ping 失败不等于 TCP 服务不可用。若系统没有 `ping` 命令，脚本会提示并跳过 Ping，不会自动安装该命令。
 
 ## 自检
-
-下载脚本后可以先检查 Bash 语法：
-
-```bash
-bash -n realmm.sh
-```
-
-再运行内置配置逻辑自检：
 
 ```bash
 bash realmm.sh --self-test
 ```
 
-自检覆盖 TOML 解析、规则增删改名、UDP 设置、单条暂停/恢复、旧版 `endpoints.dat` 导入及自定义字段保留。自检不启动或修改系统 Realm 服务。
+自检需要 Python 3.11+ 的 `tomllib`，或安装 `tomli`。自检不会连接真实转发目标，也不会修改当前 Realm 服务。
 
-## 安全提示
+## 文件
 
-- 建议先在测试 VPS 验证，再用于生产机器。
-- 公开仓库不要提交密码、密钥、Token 或私有服务器配置。
-- 云厂商安全组、NAT 端口映射和系统防火墙需要按实际网络环境单独配置。
-- UDP 连通性不能通过 TCP 探测代替，必须用实际 UDP 客户端验证。
-- 修改完整 TOML 前，建议先导出一份配置备份。
-
-## License
-
-个人项目，按需使用。使用前请自行审查脚本和 Realm 配置。
+- `realmm.sh`：主程序。
+- `.gitattributes`：统一 Shell / Markdown 文件的 LF 换行格式。

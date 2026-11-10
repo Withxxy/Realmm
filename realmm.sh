@@ -3,7 +3,7 @@
 # 配置唯一数据源：/etc/realm/config.toml
 # 不再通过 rules.list 重建配置，避免覆盖 AI 写入的自定义 TOML 参数。
 
-VERSION="2.1.0"
+VERSION="2.1.1"
 umask 077
 
 RULE_DIR="/etc/realm"
@@ -1427,23 +1427,97 @@ except Exception:
 PY
 }
 
+# 从 Realm 的 host:port / [IPv6]:port 格式中提取目标主机，供 ICMP Ping 使用。
+endpoint_host() {
+  python3 - "$1" <<'PY'
+import re, sys
+s = sys.argv[1]
+if s.startswith('['):
+    m = re.fullmatch(r'\[([^]]+)\]:\d+', s)
+    if not m:
+        raise SystemExit(2)
+    print(m.group(1))
+else:
+    if s.count(':') != 1:
+        raise SystemExit(2)
+    host, port = s.rsplit(':', 1)
+    if not host or not port.isdigit():
+        raise SystemExit(2)
+    print(host)
+PY
+}
+
+ping_probe() {
+  local host="$1" output rc=0 summary
+  if ! command -v ping >/dev/null 2>&1; then
+    warn "系统未安装 ping，跳过 ICMP 检测（可安装 iputils-ping 或 iputils）"
+    return 2
+  fi
+
+  output="$(ping -n -c 4 -W 2 -- "$host" 2>&1)" || rc=$?
+  summary="$(printf '%s\n' "$output" | grep -Ei '^(PING |.*(packets transmitted|packet loss|round-trip|rtt |min/avg/max|平均|丢包))' || true)"
+  if [[ -n "$summary" ]]; then
+    printf '%s\n' "$summary" | sed 's/^/      /'
+  else
+    printf '%s\n' "$output" | tail -n 4 | sed 's/^/      /'
+  fi
+
+  if printf '%s\n' "$output" | grep -Eq '(^|[^0-9])0([.]0+)?% packet loss|0 packets lost'; then
+    ok "ICMP Ping 有响应，未检测到丢包"
+  elif printf '%s\n' "$output" | grep -Eq '[1-9][0-9]*([.][0-9]+)?% packet loss|100% packet loss'; then
+    warn "ICMP Ping 存在丢包；目标可能限速或过滤 ICMP"
+  elif (( rc == 0 )); then
+    ok "ICMP Ping 有响应"
+  else
+    warn "ICMP Ping 无响应；目标可能禁止 ICMP，这不代表 TCP 转发不可用"
+  fi
+}
+
 test_rules() {
-  local i
+  local i port host
   show_rules || return
   load_endpoints
   echo
+  echo "========== 综合连通性测试（TCP / ICMP Ping）=========="
   for ((i=0; i<${#EP_NAMES[@]}; i++)); do
-    echo "[${EP_NAMES[i]}] ${EP_LISTENS[i]} -> ${EP_REMOTES[i]}"
-    if tcp_probe "${EP_REMOTES[i]}"; then ok "本机到目标 TCP 可连接"; else err "本机到目标 TCP 不通（不代表 UDP 状态）"; fi
-    local port
+    echo
+    echo "[${EP_NAMES[i]}]"
+    echo "监听：${EP_LISTENS[i]}"
+    echo "目标：${EP_REMOTES[i]}"
+
     port="$(endpoint_port "${EP_LISTENS[i]}")"
+    echo "--- 1. 本机 TCP 监听 ---"
     if ss -H -lnt 2>/dev/null | awk -v p="$port" '{a=$4;sub(/^.*:/,"",a);if(a==p)f=1}END{exit !f}'; then
-      ok "本机 TCP 监听端口 $port 存在"
+      ok "本机 TCP 监听端口 $port 正常"
     else
-      warn "本机 TCP 监听端口 $port 未发现"
+      err "本机 TCP 监听端口 $port 未发现"
+    fi
+
+    echo "--- 2. 目标 TCP 连接 ---"
+    if tcp_probe "${EP_REMOTES[i]}"; then
+      ok "本机到目标 TCP 可连接"
+    else
+      err "本机到目标 TCP 不通；请检查目标服务、端口及防火墙"
+    fi
+
+    echo "--- 3. 目标 ICMP Ping ---"
+    host="$(endpoint_host "${EP_REMOTES[i]}")" || {
+      warn "无法从目标地址解析主机名，跳过 Ping"
+      host=""
+    }
+    if [[ -n "$host" ]]; then
+      echo "目标主机：$host（不包含端口）"
+      ping_probe "$host" || true
     fi
   done
-  if network_udp_enabled; then warn "UDP 已开启；TCP 探测不能证明 UDP 业务正常，请使用实际 UDP 客户端测试。"; fi
+
+  echo
+  echo "--- 4. UDP 状态 ---"
+  if network_udp_enabled; then
+    warn "UDP 已开启；当前检测不进行 UDP 业务层探测，请使用对应 UDP 客户端验证"
+  else
+    echo "UDP 当前关闭"
+  fi
 }
 
 # ---------- UDP toggle ----------
@@ -1680,6 +1754,9 @@ header() {
 self_test() {
   local tmp="$1" testconf="$1/config.toml"
   mkdir -p "$tmp"
+  [[ "$(endpoint_host "172.81.111.161:48660")" == "172.81.111.161" ]] || return 1
+  [[ "$(endpoint_host "example.com:443")" == "example.com" ]] || return 1
+  [[ "$(endpoint_host "[2001:db8::1]:8443")" == "2001:db8::1" ]] || return 1
   cat > "$testconf" <<'TOML'
 [log]
 level = "warn"
@@ -1724,7 +1801,7 @@ TOML
   printf '[::]:10081|82.22.31.58:10081\n' > "$legacy_data"
   toml_tool append-legacy "$legacy_conf" "$legacy_data" >/dev/null || return 1
   [[ "$(toml_count "$legacy_conf")" == 1 ]] || return 1
-  echo "自检通过：TOML 校验、列出、改名、修改目标、UDP 修改、添加、删除、暂停/恢复、旧版 endpoints.dat 导入及自定义字段保留。"
+  echo "自检通过：TOML 校验、列出、改名、修改目标、UDP 修改、添加、删除、暂停/恢复、旧版 endpoints.dat 导入、目标主机解析（IPv4/域名/IPv6）及自定义字段保留。"
 }
 
 # ---------- Main ----------
@@ -1754,7 +1831,7 @@ while true; do
   echo " 10) 导出当前配置"
   echo " 11) 校验并应用配置"
   echo " 12) 服务状态 / 日志"
-  echo " 13) TCP 连通性测试"
+  echo " 13) 综合连通性测试（TCP / Ping）"
   echo " 14) UDP 转发开关"
   echo " 15) 识别并迁移旧版 /opt/realm"
   echo " 16) 从配置备份恢复"
