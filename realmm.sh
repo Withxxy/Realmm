@@ -13,7 +13,7 @@ MANAGER="/usr/local/bin/realmm"
 
 # 上传 GitHub 后，将“你的用户名”替换成实际 GitHub 用户名。
 # 也可以通过环境变量 REALMM_SCRIPT_URL 覆盖此地址。
-SCRIPT_URL="${REALMM_SCRIPT_URL:-https://raw.githubusercontent.com/你的用户名/realmm/main/realmm.sh}"
+SCRIPT_URL="${REALMM_SCRIPT_URL:-https://raw.githubusercontent.com/Withxxy/Realmm/main/realmm.sh}"
 
 UDP=false
 INIT=""
