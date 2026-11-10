@@ -3,7 +3,7 @@
 # 配置唯一数据源：/etc/realm/config.toml
 # 不再通过 rules.list 重建配置，避免覆盖 AI 写入的自定义 TOML 参数。
 
-VERSION="2.2.0"
+VERSION="2.2.1"
 umask 077
 
 RULE_DIR="/etc/realm"
@@ -968,8 +968,11 @@ show_rules() {
     printf '  [%d] %s\n' "$((i+1))" "${EP_NAMES[i]}"
     printf '      监听：%s\n' "${EP_LISTENS[i]}"
     printf '      目标：%s\n' "${EP_REMOTES[i]}"
-    [[ -n "${EP_TYPES[i]}" ]] && printf '      type：%s（配置中已有字段，保持原样）\n' "${EP_TYPES[i]}"
+    if [[ -n "${EP_TYPES[i]}" ]]; then
+      printf '      type：%s（配置中已有字段，保持原样）\n' "${EP_TYPES[i]}"
+    fi
   done
+  return 0
 }
 
 pick_endpoint() {
@@ -1514,76 +1517,85 @@ PY
 }
 
 ping_probe() {
-  local host="$1" output rc=0 summary
+  local host="$1" output rc=0 loss recv stats mn av mx _rest
+  local -a cmd=(ping -n -c 4 -W 2)
   if ! command -v ping >/dev/null 2>&1; then
     warn "系统未安装 ping，跳过 ICMP 检测（可安装 iputils-ping 或 iputils）"
     return 2
   fi
+  [[ "$host" == *:* ]] && cmd+=(-6)
 
-  output="$(ping -n -c 4 -W 2 -- "$host" 2>&1)" || rc=$?
-  summary="$(printf '%s\n' "$output" | grep -Ei '^(PING |.*(packets transmitted|packet loss|round-trip|rtt |min/avg/max|平均|丢包))' || true)"
-  if [[ -n "$summary" ]]; then
-    printf '%s\n' "$summary" | sed 's/^/      /'
-  else
-    printf '%s\n' "$output" | tail -n 4 | sed 's/^/      /'
-  fi
+  output="$(LC_ALL=C "${cmd[@]}" -- "$host" 2>&1)" || rc=$?
+  loss="$(printf '%s\n' "$output" | grep -Eo '[0-9]+([.][0-9]+)?% packet loss' | head -n 1 | grep -Eo '^[0-9]+([.][0-9]+)?')"
+  recv="$(printf '%s\n' "$output" | sed -n 's/.*[ ,]\([0-9][0-9]*\) \(packets \)\{0,1\}received.*/\1/p' | head -n 1)"
+  stats="$(printf '%s\n' "$output" | grep -E 'min/avg/max' | head -n 1 | sed 's/.*= *//; s/ *ms.*//')"
+  IFS=/ read -r mn av mx _rest <<< "$stats"
 
-  if printf '%s\n' "$output" | grep -Eq '(^|[^0-9])0([.]0+)?% packet loss|0 packets lost'; then
-    ok "ICMP Ping 有响应，未检测到丢包"
-  elif printf '%s\n' "$output" | grep -Eq '[1-9][0-9]*([.][0-9]+)?% packet loss|100% packet loss'; then
-    warn "ICMP Ping 存在丢包；目标可能限速或过滤 ICMP"
-  elif (( rc == 0 )); then
-    ok "ICMP Ping 有响应"
+  if { [[ -n "$recv" ]] && (( recv > 0 )); } || { [[ -z "$recv" ]] && (( rc == 0 )); }; then
+    ok "目标 IP 可达"
+    if [[ -n "$mn" && -n "$av" && -n "$mx" ]]; then
+      printf '  最低延迟：%s ms\n' "$(awk -v v="$mn" 'BEGIN{printf "%.1f", v}')"
+      printf '  平均延迟：%s ms\n' "$(awk -v v="$av" 'BEGIN{printf "%.1f", v}')"
+      printf '  最高延迟：%s ms\n' "$(awk -v v="$mx" 'BEGIN{printf "%.1f", v}')"
+    fi
+    printf '  丢包率：%s%%\n' "${loss:-0}"
+    if awk -v l="${loss:-0}" 'BEGIN{exit !(l+0 > 0)}'; then
+      warn "存在丢包；目标或链路可能限速"
+    fi
   else
-    warn "ICMP Ping 无响应；目标可能禁止 ICMP，这不代表 TCP 转发不可用"
+    warn "目标 IP 未响应 ICMP（可能禁止 Ping，这不代表 TCP 转发不可用）"
+    printf '  丢包率：%s%%\n' "${loss:-100}"
   fi
+  return 0
 }
 
 test_rules() {
   local i port host
-  show_rules || return
   load_endpoints
-  echo
-  echo "========== 综合连通性测试（TCP / ICMP Ping）=========="
+  if ((${#EP_NAMES[@]} == 0)); then
+    warn "配置中没有有效的 [[endpoints]] 转发规则"
+    return
+  fi
+  echo "========== 连通性测试 =========="
   for ((i=0; i<${#EP_NAMES[@]}; i++)); do
     echo
     echo "[${EP_NAMES[i]}]"
     echo "监听：${EP_LISTENS[i]}"
     echo "目标：${EP_REMOTES[i]}"
-
     port="$(endpoint_port "${EP_LISTENS[i]}")"
-    echo "--- 1. 本机 TCP 监听 ---"
+
+    echo
+    echo "[1] 本机监听检测"
     if ss -H -lnt 2>/dev/null | awk -v p="$port" '{a=$4;sub(/^.*:/,"",a);if(a==p)f=1}END{exit !f}'; then
-      ok "本机 TCP 监听端口 $port 正常"
+      ok "TCP $port 正在监听"
     else
-      err "本机 TCP 监听端口 $port 未发现"
+      err "TCP $port 未监听（服务未运行，或配置尚未应用）"
     fi
 
-    echo "--- 2. 目标 TCP 连接 ---"
+    echo
+    echo "[2] TCP 目标检测"
     if tcp_probe "${EP_REMOTES[i]}"; then
-      ok "本机到目标 TCP 可连接"
+      ok "目标 TCP 端口连接成功"
     else
-      err "本机到目标 TCP 不通；请检查目标服务、端口及防火墙"
+      err "目标 TCP 端口连接失败（请检查目标服务、端口及防火墙）"
     fi
 
-    echo "--- 3. 目标 ICMP Ping ---"
-    host="$(endpoint_host "${EP_REMOTES[i]}")" || {
-      warn "无法从目标地址解析主机名，跳过 Ping"
-      host=""
-    }
-    if [[ -n "$host" ]]; then
-      echo "目标主机：$host（不包含端口）"
+    echo
+    echo "[3] ICMP Ping 检测"
+    if host="$(endpoint_host "${EP_REMOTES[i]}" 2>/dev/null)" && [[ -n "$host" ]]; then
       ping_probe "$host" || true
+    else
+      warn "无法从目标地址解析主机，已跳过 Ping"
+    fi
+
+    echo
+    echo "[4] UDP 状态"
+    if network_udp_enabled; then
+      warn "UDP 已开启（本检测不做 UDP 业务探测，请用对应 UDP 客户端验证）"
+    else
+      warn "UDP 当前关闭"
     fi
   done
-
-  echo
-  echo "--- 4. UDP 状态 ---"
-  if network_udp_enabled; then
-    warn "UDP 已开启；当前检测不进行 UDP 业务层探测，请使用对应 UDP 客户端验证"
-  else
-    echo "UDP 当前关闭"
-  fi
 }
 
 # ---------- UDP toggle ----------
