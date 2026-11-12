@@ -1,97 +1,75 @@
-# Realmm 2.3.0
+# Realmm
 
-Realm TCP/UDP 转发配置管理脚本，配置文件统一使用 `/etc/realm/config.toml`。支持 systemd 和 OpenRC。
+[Realm](https://github.com/zhboner/realm) 端口转发的交互式管理脚本。不用手写 TOML，菜单里就能完成安装、添加规则、查看入口地址、连通性测试和故障回滚。
 
-## 2.3.0 更新内容
-
-- 菜单 `3) 查看转发规则` 恢复最初版显示：规则名、`监听端口 -> 转发目标`、监听状态（监听中 / 未监听），并显示本机 IPv4 / IPv6 入口地址，可直接填进客户端。
-- 入口地址按监听地址自动判断：`[::]` 显示 v6 + v4，`0.0.0.0` 只显示 v4，`127.0.0.1` 提示仅本机可访问，指定 IP 则显示该 IP。
-- 公网地址检测失败时自动改用网卡地址并提示；有已暂停的规则时在列表末尾一并显示。
-- 添加规则时监听地址支持：回车 = 随机端口（`[::]:随机`）、只输入端口号（自动补 `[::]:`）、或完整地址。
-- 通过“修改规则”改名不再重启服务；编辑完整配置如果没有改动，不再重启服务。
-- 无效 TOML 只显示一行中文错误（含行列号），不再打印 Python Traceback。
-- 配置备份只保留最近 30 份，避免备份目录无限增长。
-- Alpine / OpenRC 下防火墙规则自动保存并开机加载（`rc-service iptables save`），重启后端口放行不丢失。
-- 卸载时同步清理防火墙规则；没有规则时重启服务给出明确提示；导出配置失败时有错误提示；状态页在配置有语法错误时不再误报“配置文件尚不存在”。
-
-## 2.2.1 更新内容
-
-- 修复菜单 13 点击后只显示规则列表、不执行任何检测的问题：规则没有 `type` 字段时，`show_rules` 会返回失败状态，导致连通性测试提前退出。
-- 菜单 13 改为按规则分块输出：`[1] 本机监听检测`、`[2] TCP 目标检测`、`[3] ICMP Ping 检测`、`[4] UDP 状态`。
-- Ping 检测输出最低 / 平均 / 最高延迟和丢包率；目标禁 Ping 时只提示，不判定转发失败。
-- 兼容 iputils（Debian / Ubuntu / CentOS）和 busybox（Alpine）两种 ping 输出格式，IPv6 目标自动使用 `ping -6`。
-
-## 2.2.0 更新内容
-
-- 新增菜单 `22) 更新 realmm 脚本`：从 GitHub 检查并更新脚本本身，也可在命令行执行 `realmm --update`。
-- 更新前会校验下载内容（脚本头、版本号、`bash -n` 语法检查），失败或内容异常时不会覆盖当前脚本。
-- 更新前自动备份旧脚本到 `/etc/realm/backups/realmm-script-时间戳`，出问题可直接复制回 `/usr/local/bin/realmm`。
-- 更新脚本不会改动 Realm 服务和 `config.toml`，转发不会中断。
-- 修复在旧 glibc 系统上安装 Realm 失败（`新二进制无法运行`）：glibc 系统先尝试 gnu 版，无法运行时自动改用静态 musl 版重试。
-
-## 2.1.1 更新内容
-
-- 修复菜单 13 的功能回退：恢复 ICMP Ping 检测。
-- 菜单 13 更名为“综合连通性测试（TCP / Ping）”。
-- 每条启用规则依次检查本机 TCP 监听、目标 TCP 连接和目标主机 ICMP Ping。
-- 从 `host:port` 或 `[IPv6]:port` 中正确提取 Ping 主机，不会把目标端口当成 Ping 地址。
-- 输出 Ping 的发送/接收、丢包率和 RTT 摘要；目标禁 Ping 时明确提示，不把 ICMP 失败误判为 TCP 转发失败。
-- 保留 UDP 状态提示。UDP 业务是否可用仍需使用实际 UDP 客户端验证。
-- 增加自检：覆盖 IPv4、域名和 IPv6 目标主机解析。
-
-## 主要功能
-
-- 安装 / 更新 Realm。
-- 添加、查看（含本机 IPv4 / IPv6 入口地址）、修改、改名、删除转发规则。
-- 查看、编辑、导入、导出完整 `config.toml`，便于与 AI 协作生成配置。
-- 配置校验、应用前备份和应用失败回滚。
-- 服务状态、日志、TCP 连通性及 ICMP Ping 检测。
-- UDP 开关、单条规则暂停 / 恢复。
-- 识别并迁移旧版 `/opt/realm` 安装；迁移前备份旧文件。
-
-## 安装 / 更新
-
-在 Linux VPS 上以 root 执行：
-
-```bash
-curl -fL --retry 3 \
-  -o /usr/local/bin/realmm \
-  https://raw.githubusercontent.com/Withxxy/Realmm/main/realmm.sh \
-  && chmod 755 /usr/local/bin/realmm \
-  && realmm
+```text
+================================================
+                 Realmm 2.3.0
+================================================
+ Realm：Realm 2.9.6
+ 服务：运行中    管理器：systemd    启用：2 条 / 暂停：0 条
+ 配置：/etc/realm/config.toml
+ 快捷命令：realmm
+------------------------------------------------
+  1) 安装 / 更新 Realm
+  2) 添加转发规则
+  3) 查看转发规则
+  ...
 ```
 
-如果服务器没有 curl，可使用 wget：
+## 特性
+
+- **一键安装 Realm**：从官方 GitHub Releases 下载。glibc 太旧导致二进制无法运行时，自动改用静态 musl 版。
+- **规则管理**：添加、查看、修改、改名、删除、暂停 / 恢复单条规则。监听端口可留空，自动分配随机高位端口。
+- **查看入口地址**：列出每条规则的 `监听端口 -> 转发目标`、监听状态，以及本机 IPv4 / IPv6 入口地址，可直接填进客户端。
+- **综合连通性测试**：逐条规则检查本机监听、目标 TCP 连接、目标 ICMP Ping（延迟与丢包率）和 UDP 状态。
+- **安全修改配置**：每次改动前自动备份，应用失败自动回滚到修改前的配置；导入 / 编辑的 TOML 先校验再应用。
+- **完整配置可读可写**：可查看、编辑、导入、导出整份 `config.toml`，方便让 AI 生成配置后直接导入。
+- **兼容 systemd 和 OpenRC**：Debian / Ubuntu / CentOS / Alpine 均可使用；Alpine 下防火墙规则会自动保存并开机加载。
+- **脚本自更新**：`realmm --update` 或菜单 22，更新前校验并备份旧脚本。
+- **旧版迁移**：识别 `/opt/realm` 旧安装并迁移，迁移前完整备份，失败自动回滚。
+
+## 环境要求
+
+| 项目 | 说明 |
+|---|---|
+| 权限 | root |
+| 系统 | Linux，使用 systemd 或 OpenRC |
+| 架构 | x86_64、aarch64（armv7 尽力支持） |
+| 依赖 | bash、python3（3.11+ 自带 `tomllib`，或安装 `tomli`）、tar、ss（iproute2）、curl 或 wget |
+
+缺少依赖时，脚本会询问并尝试用 apt / dnf / yum / apk 自动安装。
+
+## 安装
+
+以 root 执行（会安装为快捷命令 `realmm`）：
+
+```bash
+curl -fL --retry 3 -o /usr/local/bin/realmm \
+  https://raw.githubusercontent.com/Withxxy/Realmm/main/realmm.sh \
+  && chmod 755 /usr/local/bin/realmm && realmm
+```
+
+没有 curl 时使用 wget：
 
 ```bash
 wget -qO /usr/local/bin/realmm \
   https://raw.githubusercontent.com/Withxxy/Realmm/main/realmm.sh \
-  && chmod 755 /usr/local/bin/realmm \
-  && realmm
+  && chmod 755 /usr/local/bin/realmm && realmm
 ```
 
-也可以先下载后检查语法：
+之后任何目录输入 `realmm` 即可打开菜单。
 
-```bash
-curl -fL --retry 3 -o /tmp/realmm.sh \
-  https://raw.githubusercontent.com/Withxxy/Realmm/main/realmm.sh
-bash -n /tmp/realmm.sh && install -m 755 /tmp/realmm.sh /usr/local/bin/realmm
-realmm
-```
+> 想先检查再安装：先下载到 `/tmp/realmm.sh`，执行 `bash -n /tmp/realmm.sh` 做语法检查，再 `install -m 755 /tmp/realmm.sh /usr/local/bin/realmm`。
 
-> 以上 Raw 链接在把本版本的 `realmm.sh` 上传到 GitHub 仓库 `Withxxy/Realmm` 的 `main` 分支后生效。仅下载本压缩包不会自动修改 GitHub 仓库。
+## 快速开始
 
-## 更新脚本
-
-```bash
-realmm --update
-```
-
-或在菜单中选择 `22) 更新 realmm 脚本`。脚本会显示当前版本和 GitHub 上的最新版本，确认后替换 `/usr/local/bin/realmm` 并可选择立即重新启动。更新源可通过环境变量 `REALMM_SCRIPT_URL` 覆盖。
-
-## 查看转发规则
-
-菜单选择 `3) 查看转发规则`：
+1. 输入 `realmm`，选 `1) 安装 / 更新 Realm`。
+2. 选 `2) 添加转发规则`，按提示输入：
+   - 规则名称：回车使用默认名（规则1、规则2……）
+   - 监听地址：回车 = 随机端口；只输入端口号（如 `10081`）会自动补成 `[::]:10081`；也可输入完整地址如 `0.0.0.0:10081`
+   - 目标地址：如 `172.81.111.161:48660` 或 `[2001:db8::1]:443`
+3. 选 `3) 查看转发规则`，复制显示的入口地址：
 
 ```text
 本机地址：IPv4 82.22.31.58    IPv6 2a0a:d687:f001::11c
@@ -101,9 +79,46 @@ realmm --update
       v4 入口：82.22.31.58:27771
 ```
 
-## 连通性测试说明
+4. 在云厂商控制台的安全组中放行对应端口（TCP；开了 UDP 则同时放行 UDP）。
+5. 选 `13) 综合连通性测试` 确认链路正常。
 
-菜单选择 `13) 综合连通性测试（TCP / Ping）`，对每条启用的规则依次输出：
+监听地址 `[::]` 为双栈，v4 和 v6 都能连入；`0.0.0.0` 只监听 IPv4。
+
+## 菜单说明
+
+| 编号 | 功能 |
+|---|---|
+| 1 | 安装 / 更新 Realm（可指定版本，默认 latest） |
+| 2 | 添加转发规则 |
+| 3 | 查看转发规则（含监听状态和本机 v4 / v6 入口地址） |
+| 4 | 修改规则：名称、监听地址或目标地址 |
+| 5 | 规则改名（只改名称，不重启服务） |
+| 6 | 删除规则（同时清理对应防火墙规则） |
+| 7 | 查看完整 `config.toml`（适合复制给 AI） |
+| 8 | 编辑完整 `config.toml`（nano / vi，保存后校验并应用） |
+| 9 | 导入 AI 生成的 TOML 文件 |
+| 10 | 导出当前配置 |
+| 11 | 校验并应用配置 |
+| 12 | 服务状态 / 日志 |
+| 13 | 综合连通性测试（TCP / Ping） |
+| 14 | UDP 转发开关 |
+| 15 | 识别并迁移旧版 `/opt/realm` |
+| 16 | 从配置备份恢复 |
+| 17 / 18 / 19 | 启动 / 停止 / 重启 Realm |
+| 20 | 卸载新版 Realm（保留 realmm 和备份） |
+| 21 | 暂停 / 恢复单条规则 |
+| 22 | 更新 realmm 脚本 |
+
+命令行参数：
+
+```bash
+realmm --update       # 更新脚本本身
+realmm --self-test    # 运行内置自检(需要 Python 3.11+ tomllib 或 tomli)
+```
+
+## 连通性测试
+
+菜单 13 对每条启用的规则依次检查：
 
 ```text
 ========== 连通性测试 ==========
@@ -129,11 +144,58 @@ realmm --update
 ! UDP 当前关闭
 ```
 
-说明：
+- Ping 只测试 VPS 到目标主机的 ICMP 可达性，不是转发链路本身。很多服务器会过滤 ICMP，Ping 失败不等于 TCP 不可用。
+- UDP 开启时只提示状态；UDP 业务是否可用需要用实际的 UDP 客户端验证。
+- 没有 `ping` 命令时会提示并跳过，不会自动安装。
 
-- Ping 只测试目标主机的 ICMP 可达性，不会测试 Realm 转发链路本身。部分服务器会过滤 ICMP，Ping 失败不等于 TCP 服务不可用。
-- 若系统没有 `ping` 命令，脚本会提示并跳过 Ping，不会自动安装。
-- UDP 开启时只提示状态；UDP 业务是否可用仍需用实际 UDP 客户端验证。
+## 文件位置
+
+| 路径 | 说明 |
+|---|---|
+| `/usr/local/bin/realm` | Realm 二进制 |
+| `/usr/local/bin/realmm` | 本管理脚本（快捷命令） |
+| `/etc/realm/config.toml` | Realm 配置，所有规则都在这里 |
+| `/etc/realm/backups/` | 配置备份（保留最近 30 份）和脚本更新前的旧版本备份 |
+| `/etc/systemd/system/realm.service` | systemd 服务（systemd 系统） |
+| `/etc/init.d/realm` | OpenRC 服务（Alpine） |
+| `/var/log/realm.log` | OpenRC 下的日志；systemd 下用 `journalctl -u realm` |
+| `/root/realmm-migration-时间戳/` | 旧版迁移时的完整备份 |
+
+规则名称保存在 `config.toml` 的注释里（`# realmm-name-b64: ...`），不会写入 Realm 不认识的配置字段，也不影响手动编辑。
+
+## 防火墙
+
+脚本会在 `iptables` / `ip6tables` 的 INPUT 链放行规则端口，并带 `realmm:端口` 注释，删除规则时精确清理。
+
+- 检测到 **UFW** 或 **firewalld** 已启用时，只给出提示，需要你手动放行端口。
+- Debian 系安装了 `netfilter-persistent` 时会自动保存规则；Alpine（OpenRC）会执行 `rc-service iptables save` 并加入开机启动。
+- **云厂商安全组 / NAT 端口映射需要在控制台单独放行**，脚本改不了。
+
+## 备份与回滚
+
+- 添加、修改、删除、导入、编辑、恢复前都会先备份当前配置。
+- 应用配置后 Realm 没能正常启动，会自动回滚到修改前的配置并尝试恢复服务。
+- 菜单 16 可从任意一份备份恢复。
+
+## 常见问题
+
+**安装时提示 `GLIBC_2.xx not found` 或"新二进制无法运行"**
+2.2.0 起会自动改用静态 musl 版重试。如果还在用旧版脚本，先 `realmm --update`。
+
+**客户端连不上，但服务显示运行中**
+按顺序排查：菜单 13 看本机监听和目标 TCP；检查云厂商安全组是否放行了监听端口；目标服务器是否限制了来源 IP（需要放行本机 v4）；监听地址是否为 `0.0.0.0`（此时 v6 无法连入）。
+
+**本机没有 IPv6，只想用 v4**
+添加规则时监听地址填 `0.0.0.0:端口`。
+
+**菜单 3 里的 IPv4 地址不对**
+地址通过 ip.sb 等外部服务检测；检测失败时会回退为网卡地址。NAT 机器请以云厂商面板里的公网 IP 为准。
+
+**Ping 失败但 TCP 正常**
+目标禁了 ICMP，属于正常情况，以 TCP 检测结果为准。
+
+**想手动改配置**
+直接编辑 `/etc/realm/config.toml` 后选菜单 11（校验并应用），或用菜单 8 编辑，保存后自动校验、应用、失败回滚。
 
 ## 自检
 
@@ -141,9 +203,15 @@ realmm --update
 bash realmm.sh --self-test
 ```
 
-自检需要 Python 3.11+ 的 `tomllib`，或安装 `tomli`。自检不会连接真实转发目标，也不会修改当前 Realm 服务。
+覆盖 TOML 解析与编辑、规则增删改、暂停 / 恢复、UDP 开关、旧版规则导入、目标主机与监听地址解析等逻辑。自检不会连接真实转发目标，也不会修改当前 Realm 服务。
 
-## 文件
+## 仓库文件
 
-- `realmm.sh`：主程序。
-- `.gitattributes`：统一 Shell / Markdown 文件的 LF 换行格式。
+- `realmm.sh`：主程序
+- `README.md`：本说明
+- `CHANGELOG.md`：更新日志
+- `.gitattributes`：统一 Shell / Markdown 文件为 LF 换行
+
+## 致谢
+
+转发核心：[zhboner/realm](https://github.com/zhboner/realm)。
