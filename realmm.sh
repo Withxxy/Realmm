@@ -3,7 +3,7 @@
 # 配置唯一数据源：/etc/realm/config.toml
 # 不再通过 rules.list 重建配置，避免覆盖 AI 写入的自定义 TOML 参数。
 
-VERSION="2.2.1"
+VERSION="2.3.0"
 umask 077
 
 RULE_DIR="/etc/realm"
@@ -21,6 +21,7 @@ INIT=""
 V4=""
 V6=""
 IPS_DONE=""
+IPS_FALLBACK=0
 FW_WARNED=""
 
 # Endpoint fields are loaded from config.toml; no separate rules.list is authoritative.
@@ -422,7 +423,14 @@ def set_endpoint_field(lines, index, key, value):
 
 
 if op == "validate":
-    data, eps = read_config(path)
+    try:
+        data, eps = read_config(path)
+    except tomllib.TOMLDecodeError as e:
+        print(f"TOML 语法错误：{e}", file=sys.stderr)
+        sys.exit(1)
+    except (ValueError, OSError) as e:
+        print(f"配置不符合要求：{e}", file=sys.stderr)
+        sys.exit(1)
     print(f"TOML 语法正常；检测到 {len(eps)} 条有效 endpoint")
 elif op == "count":
     _, eps = read_config(path)
@@ -639,6 +647,8 @@ backup_config() {
   [[ -e "$dest" ]] && dest="$BACKUP_DIR/config-$ts-$$.toml"
   cp -p "$CONF" "$dest" || return 1
   chmod 600 "$dest" 2>/dev/null || true
+  # 仅保留最近 30 份配置备份，避免备份目录无限增长
+  ls -1t "$BACKUP_DIR"/config-*.toml 2>/dev/null | tail -n +31 | while read -r old_backup; do rm -f "$old_backup"; done
   printf '%s' "$dest"
 }
 
@@ -852,6 +862,19 @@ fw_del_one() {
   while "$ipt" -D INPUT -p "$proto" --dport "$port" -m comment --comment "$tag" -j ACCEPT 2>/dev/null; do :; done
 }
 
+fw_persist() {
+  local s
+  if command -v netfilter-persistent >/dev/null 2>&1; then netfilter-persistent save >/dev/null 2>&1 || true; fi
+  if [[ "$INIT" == openrc ]]; then
+    for s in iptables ip6tables; do
+      if [[ -f "/etc/init.d/$s" ]]; then
+        rc-service "$s" save >/dev/null 2>&1 || true
+        rc-update add "$s" default >/dev/null 2>&1 || true
+      fi
+    done
+  fi
+}
+
 fw_open_port() {
   local port="$1" ipt
   if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
@@ -871,7 +894,7 @@ fw_open_port() {
       fw_del_one "$ipt" udp "$port"
     fi
   done
-  if command -v netfilter-persistent >/dev/null 2>&1; then netfilter-persistent save >/dev/null 2>&1 || true; fi
+  fw_persist
 }
 
 fw_close_port() {
@@ -880,7 +903,7 @@ fw_close_port() {
     command -v "$ipt" >/dev/null 2>&1 || continue
     for proto in tcp udp; do fw_del_one "$ipt" "$proto" "$port"; done
   done
-  command -v netfilter-persistent >/dev/null 2>&1 && netfilter-persistent save >/dev/null 2>&1 || true
+  fw_persist
 }
 
 fw_sync_config() {
@@ -975,6 +998,106 @@ show_rules() {
   return 0
 }
 
+# ---------- Rule list with local IPv4 / IPv6 entry addresses ----------
+fetch_public_ip() {
+  local family="$1" url out
+  for url in https://ip.sb https://api64.ipify.org https://ifconfig.me https://icanhazip.com; do
+    out=""
+    if command -v curl >/dev/null 2>&1; then
+      out="$(curl -"$family" -fsS --max-time 5 "$url" 2>/dev/null || true)"
+    elif command -v wget >/dev/null 2>&1; then
+      out="$(wget -"$family" -qO- -T 5 "$url" 2>/dev/null || true)"
+    fi
+    out="$(printf '%s' "$out" | tr -d '[:space:]')"
+    if [[ "$family" == 4 && "$out" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then printf '%s' "$out"; return 0; fi
+    if [[ "$family" == 6 && "$out" == *:* && "$out" =~ ^[0-9A-Fa-f:]+$ ]]; then printf '%s' "$out"; return 0; fi
+  done
+  return 1
+}
+
+local_global_ip() {
+  command -v ip >/dev/null 2>&1 || return 1
+  ip -"$1" -o addr show scope global 2>/dev/null | awk '{print $4}' | head -n 1 | cut -d/ -f1
+}
+
+detect_local_ips() {
+  [[ -n "$IPS_DONE" ]] && return 0
+  echo "正在检测本机 IPv4 / IPv6 ..."
+  V4="$(fetch_public_ip 4 || true)"
+  V6="$(fetch_public_ip 6 || true)"
+  IPS_FALLBACK=0
+  if [[ -z "$V4" ]]; then V4="$(local_global_ip 4 || true)"; [[ -n "$V4" ]] && IPS_FALLBACK=1; fi
+  if [[ -z "$V6" ]]; then V6="$(local_global_ip 6 || true)"; [[ -n "$V6" ]] && IPS_FALLBACK=1; fi
+  IPS_DONE=1
+  return 0
+}
+
+listen_host() {
+  local s="$1"
+  if [[ "$s" == \[*\]:* ]]; then
+    s="${s#\[}"
+    printf '%s' "${s%%\]*}"
+  else
+    printf '%s' "${s%:*}"
+  fi
+}
+
+print_entries() {
+  local host="$1" port="$2"
+  case "$host" in
+    ""|"::")
+      if [[ -n "$V6" ]]; then printf '      v6 入口：[%s]:%s\n' "$V6" "$port"; fi
+      if [[ -n "$V4" ]]; then printf '      v4 入口：%s:%s\n' "$V4" "$port"; fi
+      if [[ -z "$V6" && -z "$V4" ]]; then printf '      未能检测到本机地址，请手动使用「服务器IP:%s」\n' "$port"; fi
+      ;;
+    0.0.0.0)
+      if [[ -n "$V4" ]]; then printf '      v4 入口：%s:%s\n' "$V4" "$port"
+      else printf '      未能检测到本机 IPv4，请手动使用「服务器IP:%s」\n' "$port"; fi
+      ;;
+    127.0.0.1|::1|localhost)
+      printf '      仅本机回环可访问：%s:%s\n' "$host" "$port"
+      ;;
+    *:*) printf '      v6 入口：[%s]:%s\n' "$host" "$port" ;;
+    *)   printf '      v4 入口：%s:%s\n' "$host" "$port" ;;
+  esac
+  return 0
+}
+
+list_rules() {
+  local i port status
+  load_endpoints
+  load_paused_endpoints
+  if ((${#EP_NAMES[@]} == 0)); then
+    warn "配置中没有有效的 [[endpoints]] 转发规则"
+  else
+    detect_local_ips
+    echo
+    echo "本机地址：IPv4 ${V4:-无}    IPv6 ${V6:-无}"
+    if [[ "$IPS_FALLBACK" == 1 ]]; then warn "公网地址检测失败，已改用网卡地址；NAT 机器请以云厂商面板的公网 IP 为准"; fi
+    echo
+    for ((i=0; i<${#EP_NAMES[@]}; i++)); do
+      port="$(endpoint_port "${EP_LISTENS[i]}")"
+      if ss -H -lnt 2>/dev/null | awk -v p="$port" '{a=$4;sub(/^.*:/,"",a);if(a==p)f=1}END{exit !f}'; then
+        status="${G}监听中${N}"
+      else
+        status="${R}未监听${N}"
+      fi
+      printf '  [%d] %s   :%s -> %s   (%s)\n' "$((i+1))" "${EP_NAMES[i]}" "$port" "${EP_REMOTES[i]}" "$status"
+      print_entries "$(listen_host "${EP_LISTENS[i]}")" "$port"
+    done
+    echo
+    echo "提示：客户端填写上面的入口地址；云厂商安全组需放行对应端口。"
+  fi
+  if ((${#PAUSED_NAMES[@]} > 0)); then
+    echo
+    echo "已暂停的规则（菜单 21 可恢复）："
+    for ((i=0; i<${#PAUSED_NAMES[@]}; i++)); do
+      printf '  [%d] %s   %s -> %s\n' "$((i+1))" "${PAUSED_NAMES[i]}" "${PAUSED_LISTENS[i]}" "${PAUSED_REMOTES[i]}"
+    done
+  fi
+  return 0
+}
+
 pick_endpoint() {
   local prompt="$1" total
   load_endpoints
@@ -1035,7 +1158,15 @@ add_rule() {
     break
   done
 
-  read -r -p '监听地址（例如 0.0.0.0:10081 或 [::]:10081）：' listen
+  read -r -p '监听地址或端口（回车=随机端口；例如 10081、0.0.0.0:10081、[::]:10081）：' listen
+  if [[ -z "$listen" ]]; then
+    port="$(random_port)" || { err "无法分配随机端口，请手动输入"; return; }
+    listen="[::]:$port"
+    echo "已分配随机端口：$port（监听 $listen）"
+  elif [[ "$listen" =~ ^[0-9]+$ ]]; then
+    valid_port "$listen" || { err "端口范围应为 1-65535"; return; }
+    listen="[::]:$((10#$listen))"
+  fi
   valid_hostport "$listen" || { err "监听地址格式不正确"; return; }
   port="$(endpoint_port "$listen")"
   if port_in_config "$port" || port_in_system "$port"; then
@@ -1078,6 +1209,8 @@ edit_rule() {
       name_used "$value" && { err "名称已存在"; return; }
       backup="$(backup_config)" || return
       toml_tool rename "$CONF" "$idx" "$value" || { [[ -n "$backup" ]] && restore_config_file "$backup"; err "改名失败"; return; }
+      ok "已改名（仅修改名称注释，未重启服务）"
+      return
       ;;
     2)
       read -r -p '新的监听地址：' value
@@ -1223,6 +1356,10 @@ edit_config() {
     err "未安装 nano 或 vi；请先安装编辑器"
     return
   fi
+  if [[ -n "$backup" ]] && cmp -s "$backup" "$CONF"; then
+    echo "配置未改动，无需重启服务"
+    return
+  fi
   apply_config "$backup"
 }
 
@@ -1253,7 +1390,11 @@ export_config() {
   local out
   read -r -p "导出路径（回车默认 /root/realm-config-$(date +%Y%m%d-%H%M%S).toml）：" out
   out="${out:-/root/realm-config-$(date +%Y%m%d-%H%M%S).toml}"
-  cp -p "$CONF" "$out" && chmod 600 "$out" && ok "配置已导出：$out"
+  if cp -p "$CONF" "$out" && chmod 600 "$out"; then
+    ok "配置已导出：$out"
+  else
+    err "导出失败：请检查路径是否存在且可写"
+  fi
 }
 
 restore_config() {
@@ -1433,7 +1574,10 @@ stop_realm() {
 restart_realm() {
   refuse_if_legacy && return
   [[ -x "$BIN" ]] || { err "Realm 尚未安装"; return; }
+  [[ -s "$CONF" ]] || { err "配置文件不存在"; return; }
   toml_validate "$CONF" || return
+  [[ "$(toml_count "$CONF")" -gt 0 ]] || { err "配置中没有 [[endpoints]]，请先添加规则"; return; }
+  service_exists || write_service || return
   svc restart >/dev/null 2>&1
   sleep 2
   service_active && ok "Realm 已重启" || err "重启失败，请查看日志"
@@ -1460,7 +1604,11 @@ show_status() {
   fi
   echo
   echo "--- TOML 配置检查 ---"
-  [[ -s "$CONF" ]] && toml_validate "$CONF" || echo "新版配置文件尚不存在"
+  if [[ -s "$CONF" ]]; then
+    toml_validate "$CONF" || true
+  else
+    echo "新版配置文件尚不存在"
+  fi
   echo
   echo "--- 监听端口 ---"
   command -v ss >/dev/null 2>&1 && ss -lntup 2>/dev/null | grep -E 'realm|State|Netid' || true
@@ -1785,6 +1933,12 @@ uninstall_realm() {
   fi
   read -r -p '确认卸载新版 Realm 服务和二进制？输入 yes：' answer
   [[ "$answer" == yes ]] || { echo "已取消"; return; }
+  local i uport
+  load_endpoints
+  for ((i=0; i<${#EP_LISTENS[@]}; i++)); do
+    uport="$(endpoint_port "${EP_LISTENS[i]}")"
+    [[ "$uport" =~ ^[0-9]+$ ]] && fw_close_port "$uport"
+  done
   svc stop >/dev/null 2>&1 || true
   svc disable >/dev/null 2>&1 || true
   if [[ "$INIT" == systemd ]]; then
@@ -1835,6 +1989,10 @@ self_test() {
   [[ "$(endpoint_host "172.81.111.161:48660")" == "172.81.111.161" ]] || return 1
   [[ "$(endpoint_host "example.com:443")" == "example.com" ]] || return 1
   [[ "$(endpoint_host "[2001:db8::1]:8443")" == "2001:db8::1" ]] || return 1
+  [[ "$(listen_host "[::]:10081")" == "::" ]] || return 1
+  [[ "$(listen_host "0.0.0.0:20000")" == "0.0.0.0" ]] || return 1
+  [[ "$(listen_host "[2001:db8::1]:443")" == "2001:db8::1" ]] || return 1
+  [[ "$(listen_host "203.0.113.5:8080")" == "203.0.113.5" ]] || return 1
   cat > "$testconf" <<'TOML'
 [log]
 level = "warn"
@@ -1931,7 +2089,7 @@ while true; do
   case "$choice" in
     1) install_realm ;;
     2) add_rule ;;
-    3) show_rules ;;
+    3) list_rules ;;
     4) edit_rule ;;
     5) rename_rule ;;
     6) delete_rule ;;
